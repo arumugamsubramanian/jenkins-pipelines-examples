@@ -1,0 +1,140 @@
+#!groovy
+import jenkins.model.*
+import hudson.model.*
+import java.util.concurrent.*
+import groovy.transform.InheritConstructors
+import hudson.model.Computer;
+import hudson.model.Executor;
+import hudson.model.Item;
+import hudson.model.Queue.Executable;
+import hudson.model.queue.SubTask
+import jenkins.model.Jenkins;
+import com.cloudbees.workflow.rest.external.RunExt
+import com.cloudbees.workflow.rest.external.StatusExt
+import org.jenkinsci.plugins.workflow.job.WorkflowRun
+import hudson.plugins.git.GitChangeSet
+import hudson.scm.ChangeLogSet;
+import com.cloudbees.plugins.credentials.Credentials;
+import com.cloudbees.plugins.credentials.CredentialsMatchers;
+import com.cloudbees.plugins.credentials.common.UsernamePasswordCredentials;
+import com.cloudbees.plugins.credentials.domains.DomainRequirement;
+import hudson.model.Item;
+import hudson.model.ItemGroup;
+import hudson.model.Run;
+import hudson.security.ACL;
+import jenkins.plugins.git.AbstractGitSCMSource;
+import jenkins.scm.api.SCMRevision;
+import jenkins.scm.api.SCMRevisionAction;
+import jenkins.scm.api.SCMSource;
+import org.jenkinsci.plugins.plaincredentials.impl.FileCredentialsImpl
+import com.cloudbees.plugins.credentials.SecretBytes
+import org.jenkinsci.plugins.workflow.multibranch.WorkflowMultiBranchProject;
+
+def config = [
+        skipXrayScan: true,
+        failXrayScanBuild: true,
+        podStatusWaitTime: 30,
+        helmRollbackWaitTime: 30,
+//        releaseName: 'jenkins',
+//        namespace: 'jenkins'
+        releaseName: 'what-the-helm',
+        namespace: 'default'
+]
+pipeline {
+    agent {
+        node {
+            label '!master'
+            customWorkspace '/home/aarus/jenkins-workspace'
+        }
+    }
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        timeout(time: 1, unit: 'HOURS')
+    }
+    stages {
+        stage('Stage 1') {
+            steps {
+                script {
+                    try {
+                        def cred_id = 'kubeconfig'
+                        def file_name = 'aru.yaml'
+
+                        def creds = com.cloudbees.plugins.credentials.CredentialsProvider.lookupCredentials(
+                                com.cloudbees.plugins.credentials.common.StandardCredentials.class,
+                                Jenkins.instance,
+                                null,
+                                null
+                        )
+
+                        def cred = creds.find { it.id == cred_id}
+                        println "current values: ${cred.id} ${cred.content}"
+
+                        def kubeConfigFilePath = findFiles excludes: '', glob: '**/config'
+
+                        String file_content = readFile encoding: 'UTF-8', file: "${kubeConfigFilePath[0].path}"
+                        String content = file_content.bytes.encodeBase64().toString()
+                        updateFile(cred, content)
+
+                        def newCreds = com.cloudbees.plugins.credentials.CredentialsProvider.lookupCredentials(
+                                com.cloudbees.plugins.credentials.common.StandardCredentials.class,
+                                Jenkins.instance,
+                                null,
+                                null
+                        )
+                        def newCred = newCreds.find { it.id == cred_id}
+                        println "new values: ${newCred.id} ${newCred.content}"
+
+                        withCredentials([[$class: 'FileBinding', credentialsId: "kubeconfig", variable: 'KUBECONFIG']]) {
+                            sh "mkdir -p ~/.kube-test-aru && cat \$KUBECONFIG >> ~/.kube-test-aru/config";
+                            credentials_store = null
+                        }
+                    } catch(e) {
+                        throw e
+                    }
+                }
+            }
+        }
+    }
+}
+
+void printAllMethods( obj ){
+    if( !obj ){
+        println( "Object is null\r\n" );
+        return;
+    }
+    if( !obj.metaClass && obj.getClass() ){
+        printAllMethods( obj.getClass() );
+        return;
+    }
+    def str = "class ${obj.getClass().name} functions:\r\n";
+    obj.metaClass.methods.name.unique().each{
+        str += it+"(); ";
+    }
+    println "${str}\r\n";
+}
+
+@NonCPS
+def updateFile(def cred, String content) {
+    def credentials_store = jenkins.model.Jenkins.instance.getExtensionList(
+            'com.cloudbees.plugins.credentials.SystemCredentialsProvider'
+    )[0].getStore()
+
+    def updated = credentials_store.updateCredentials(
+            com.cloudbees.plugins.credentials.domains.Domain.global(),
+            cred,
+            new FileCredentialsImpl(
+                    cred.scope,
+                    cred.id,
+                    cred.description,
+                    cred.fileName,
+                    SecretBytes.fromString(content)
+            )
+    )
+
+    if (updated) {
+        println "password changed for '${cred.id}'"
+    } else {
+        println "failed to change password for '${cred.id}'"
+    }
+}
