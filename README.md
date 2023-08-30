@@ -1,1 +1,1 @@
-# groovy-testing
+# Jenkins Pipelines Example Repo
